@@ -1,0 +1,363 @@
+# SAM Template para TTS Notes - bootstrap
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: TTS Notes - bootstrap
+
+# Configurações globais para todas as funções Lambda
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 10
+    MemorySize: 128
+
+# Definição dos recursos
+Resources:
+  # Pool de usuários Cognito para autenticação
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: tts-notes-userpool
+      UsernameAttributes: [email]
+      AutoVerifiedAttributes: [email]
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireUppercase: false
+          RequireSymbols: false
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: false
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientName: tts-notes-client
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_SRP_AUTH
+
+  # Tabela DynamoDB para armazenar as notas
+  NotesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: tts-notes
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: createdAt
+          AttributeType: S
+        - AttributeName: noteId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+        - AttributeName: createdAt
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: noteById
+          KeySchema:
+            - AttributeName: noteId
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+  # CREATE: POST /notes  (gera MP3 com Polly, salva no S3 e grava no DynamoDB)
+  CreateNoteFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: create_note.handler
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref NotesTable
+          BUCKET_NAME: !Ref AudioBucket
+          DEFAULT_VOICE: "Camila"
+          POLLY_REGION: "sa-east-1" # ajuste conforme necessário
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref NotesTable
+        - S3CrudPolicy:
+            BucketName: !Ref AudioBucket
+        - Statement:
+            - Effect: Allow
+              Action: polly:SynthesizeSpeech
+              Resource: "*"
+      Events:
+        CreateNote:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /notes
+            Method: POST
+            Auth:
+              Authorizer: CognitoAuth
+
+  # UPDATE: PUT /notes/{id}  (re-sintetiza, substitui o MP3 e atualiza metadados)
+  UpdateNoteFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: update_note.handler
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref NotesTable
+          BUCKET_NAME: !Ref AudioBucket
+          DEFAULT_VOICE: "Camila"
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref NotesTable
+        - S3CrudPolicy:
+            BucketName: !Ref AudioBucket
+        - Statement:
+            - Effect: Allow
+              Action: polly:SynthesizeSpeech
+              Resource: "*"
+      Events:
+        UpdateNote:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /notes/{id}
+            Method: PUT
+
+  # SEARCH: GET /notes/search?q=...
+  SearchNotesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: search_notes.handler
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref NotesTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref NotesTable
+      Events:
+        SearchNotes:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /notes/search
+            Method: GET
+
+  # GET AUDIO URL: GET /notes/{id}/audio-url  (gera pre-signed URL do MP3)
+  GetNoteUrlFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: get_note_url.handler
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref NotesTable
+          BUCKET_NAME: !Ref AudioBucket
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref NotesTable
+        - S3ReadPolicy:
+            BucketName: !Ref AudioBucket
+      Events:
+        GetNoteUrl:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /notes/{id}/audio-url
+            Method: GET
+
+  # DELETE: DELETE /notes/{id}  (apaga do S3 e do DynamoDB)
+  DeleteNoteFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: delete_note.handler
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref NotesTable
+          BUCKET_NAME: !Ref AudioBucket
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref NotesTable
+        - S3CrudPolicy:
+            BucketName: !Ref AudioBucket
+      Events:
+        DeleteNote:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /notes/{id}
+            Method: DELETE
+
+    # API GATEWAY
+  Api:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: prod
+      Cors:
+        AllowOrigin: "'*'"
+        AllowHeaders: "'Content-Type,Authorization'"
+        AllowMethods: "'OPTIONS,GET,POST,PUT,DELETE'"
+      Auth:
+        DefaultAuthorizer: CognitoAuth
+        Authorizers:
+          CognitoAuth:
+            UserPoolArn: !GetAtt UserPool.Arn
+
+  GatewayResponseDefault4XX:
+    Type: AWS::ApiGateway::GatewayResponse
+    Properties:
+      RestApiId: !Ref Api
+      ResponseType: DEFAULT_4XX
+      ResponseParameters:
+        gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+        gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
+        gatewayresponse.header.Access-Control-Allow-Methods: "'OPTIONS,GET,POST,PUT,DELETE'"
+
+  GatewayResponseDefault5XX:
+    Type: AWS::ApiGateway::GatewayResponse
+    Properties:
+      RestApiId: !Ref Api
+      ResponseType: DEFAULT_5XX
+      ResponseParameters:
+        gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+        gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
+        gatewayresponse.header.Access-Control-Allow-Methods: "'OPTIONS,GET,POST,PUT,DELETE'"
+
+  # Função Lambda para o endpoint /health para testar se a API está funcionando
+  HealthFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: health.handler
+      Events:
+        Health:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /health
+            Method: GET
+            Auth:
+              Authorizer: NONE
+
+  # Função Lambda para o endpoint /me para retornar informações do usuário autenticado
+  MeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: me.handler
+      Events:
+        Me:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /me
+            Method: GET
+
+  # === Bucket PRIVADO para MP3 (somente via pre-signed URL) ===
+  AudioBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "tts-notes-audio-${AWS::AccountId}-${AWS::Region}"
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      CorsConfiguration:
+        CorsRules:
+          - AllowedMethods: [GET, PUT]
+            AllowedOrigins: ["*"] # Ajuste confome necessário
+            AllowedHeaders: ["*"]
+            MaxAge: 3000
+      LifecycleConfiguration:
+        Rules:
+          - Id: abort-multipart-after-1d
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+
+  # === Bucket do SITE ESTÁTICO (público leitura) ===
+  WebsiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "tts-notes-site-${AWS::AccountId}-${AWS::Region}"
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: index.html
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+
+  WebsiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WebsiteBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: PublicReadGetObject
+            Effect: Allow
+            Principal: "*"
+            Action: s3:GetObject
+            Resource: !Sub "${WebsiteBucket.Arn}/*"
+
+  # Lista notas do usuário autenticado: GET /notes
+  ListNotesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: list_notes.handler
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref NotesTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref NotesTable
+      Events:
+        ListNotes:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /notes
+            Method: GET
+            Auth:
+              Authorizer: CognitoAuth # garante uso do Cognito (Bearer), não AWS_IAM
+
+# Saídas do CloudFormation
+Outputs:
+  ApiUrl:
+    Description: Base URL da API
+    Value: !Sub "https://${Api}.execute-api.${AWS::Region}.amazonaws.com/prod"
+  UserPoolId:
+    Description: Cognito User Pool Id
+    Value: !Ref UserPool
+  UserPoolClientId:
+    Description: Cognito User Pool Client Id
+    Value: !Ref UserPoolClient
+  NotesTableName:
+    Description: Nome da tabela DynamoDB
+    Value: !Ref NotesTable
+  AudioBucketName:
+    Description: Bucket de áudio (privado)
+    Value: !Ref AudioBucket
+  WebsiteURL:
+    Description: URL do site estático (S3 website endpoint)
+    Value: !GetAtt WebsiteBucket.WebsiteURL
+  WebsiteBucketName:
+    Description: Nome do bucket do site
+    Value: !Ref WebsiteBucket

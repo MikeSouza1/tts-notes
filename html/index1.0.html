@@ -1,0 +1,381 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TTS Notes — Demo</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%2322c55e'/%3E%3C/svg%3E">
+  <style>
+    :root { --bg:#0f172a; --panel:#111827; --muted:#64748b; --text:#e5e7eb; --accent:#22c55e; --danger:#ef4444; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"; color: var(--text); background: radial-gradient(1200px 600px at 10% -10%, #1f2937 0%, var(--bg) 60%); }
+    header { padding: 24px; border-bottom: 1px solid #1f2937; display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; }
+    header h1 { margin: 0; font-size: 20px; letter-spacing: .3px; }
+    .container { max-width: 980px; margin: 24px auto; padding: 0 16px; }
+    .card { background: rgba(17,24,39,.75); backdrop-filter: blur(8px); border: 1px solid #1f2937; border-radius: 16px; padding: 16px; box-shadow: 0 10px 30px rgba(0,0,0,.2); }
+    .grid { display: grid; gap: 16px; }
+    .grid.cols-2 { grid-template-columns: 1fr 1fr; }
+    .muted { color: var(--muted); font-size: 13px; }
+    input, textarea, select, button { border-radius: 10px; border: 1px solid #374151; background: #0b1220; color: var(--text); padding: 10px 12px; font-size: 14px; width: 100%; }
+    button { cursor: pointer; background: linear-gradient(180deg,#16a34a,#15803d); border: none; }
+    button:hover { filter: brightness(1.05); }
+    button.secondary { background: linear-gradient(180deg,#374151,#1f2937); }
+    button.danger { background: linear-gradient(180deg,#ef4444,#b91c1c); }
+    .row { display: flex; gap: 8px; align-items: center; }
+    .row > * { flex: 1; }
+    .note { display: grid; grid-template-columns: 1fr auto; align-items: start; gap: 8px; padding: 12px; border: 1px solid #1f2937; border-radius: 12px; }
+    .note h4 { margin: 0; font-size: 15px; }
+    .note .actions { display: flex; gap: 8px; }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 12px; background: #0b1220; border: 1px solid #334155; color: #cbd5e1; }
+    .hidden { display: none; }
+    .footer { margin-top: 24px; font-size: 12px; text-align: center; color: var(--muted); }
+    .ok { color: var(--accent); }
+    .err { color: var(--danger); }
+    .audio { width:100%; margin-top:6px; }
+  </style>
+  <script>
+    // ==== Helpers globais e constantes (carregam antes de tudo) ====
+    const els = (id) => document.getElementById(id);
+    const API_BASE = 'https://azt9v4vjue.execute-api.sa-east-1.amazonaws.com/prod';
+
+    // Cognito via API REST (sem Amplify)
+    const COGNITO = {
+      region: 'sa-east-1',
+      clientId: '1vucjkf98cfgtnm07pk75dse6d',
+      endpoint: 'https://cognito-idp.sa-east-1.amazonaws.com/'
+    };
+
+    let ID_TOKEN = null;
+
+    function showApp(authed){
+      const on = !!authed;
+      els('card-auth').classList.toggle('hidden', on);
+      els('card-create').classList.toggle('hidden', !on);
+      els('card-list').classList.toggle('hidden', !on);
+    }
+
+    function note(id, msg){ els(id).innerHTML = `<span class="ok">${escapeHtml(msg)}</span>`; }
+    function err(id, msg){ els(id).innerHTML = `<span class="err">${escapeHtml(msg)}</span>`; }
+    function escapeHtml(s){ return String(s||'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c])); }
+    function fmtDate(iso){ try{ return new Date(iso).toLocaleString(); }catch{ return iso; } }
+
+    async function cognito(target, payload){
+      const res = await fetch(COGNITO.endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-amz-json-1.1',
+          'X-Amz-Target': 'AWSCognitoIdentityProviderService.' + target
+        },
+        body: JSON.stringify(payload)
+      });
+      if(!res.ok){
+        const txt = await res.text();
+        throw new Error(`Cognito ${target} ${res.status}: ${txt}`);
+      }
+      return res.json();
+    }
+
+    async function idToken(){
+      if(ID_TOKEN) return ID_TOKEN;
+      const rt = localStorage.getItem('tts_refresh');
+      if(rt){
+        const r = await cognito('InitiateAuth', {
+          AuthFlow: 'REFRESH_TOKEN_AUTH',
+          ClientId: COGNITO.clientId,
+          AuthParameters: { REFRESH_TOKEN: rt }
+        });
+        ID_TOKEN = r.AuthenticationResult.IdToken;
+        return ID_TOKEN;
+      }
+      throw new Error('Não autenticado');
+    }
+
+    async function api(path, opts={}){
+      const token = await idToken();
+      const res = await fetch(API_BASE + path, {
+        ...opts,
+        headers: {
+          'Authorization': 'Bearer ' + token,
+          'Content-Type': 'application/json',
+          ...(opts.headers||{})
+        }
+      });
+      if(!res.ok){
+        const txt = await res.text();
+        throw new Error(`HTTP ${res.status}: ${txt}`);
+      }
+      const ct = res.headers.get('content-type')||'';
+      return ct.includes('application/json') ? res.json() : res.text();
+    }
+
+    // ==== Ações Auth ====
+    async function signIn(){
+      try{
+        const email = els('email').value.trim();
+        const pass = els('password').value;
+        const r = await cognito('InitiateAuth', {
+          AuthFlow: 'USER_PASSWORD_AUTH',
+          ClientId: COGNITO.clientId,
+          AuthParameters: { USERNAME: email, PASSWORD: pass }
+        });
+        const ar = r.AuthenticationResult;
+        ID_TOKEN = ar.IdToken;
+        if(ar.RefreshToken) localStorage.setItem('tts_refresh', ar.RefreshToken);
+        note('authStatus','Autenticado.');
+        showApp(true);
+        await refreshList();
+      }catch(e){ err('authStatus', e.message||e); }
+    }
+
+    async function signOut(){
+      ID_TOKEN = null; localStorage.removeItem('tts_refresh');
+      note('authStatus','Sessão encerrada.');
+      showApp(false);
+    }
+
+    async function doSignUp(){
+      try{
+        const email = els('emailSu').value.trim();
+        const p1 = els('passwordSu').value; const p2 = els('passwordSu2').value;
+        if(!email || !p1) throw new Error('Preencha e-mail e senha');
+        if(p1 !== p2) throw new Error('As senhas não conferem');
+        await cognito('SignUp', {
+          ClientId: COGNITO.clientId,
+          Username: email,
+          Password: p1,
+          UserAttributes: [{ Name: 'email', Value: email }]
+        });
+        note('authStatus','Conta criada! Verifique seu e-mail e confirme o código.');
+        els('emailConf').value = email;
+        show('panel-signup', false); show('panel-confirm', true);
+      }catch(e){ err('authStatus', e.message||e); }
+    }
+
+    async function doConfirm(){
+      try{
+        const email = (els('emailConf').value.trim() || els('email').value.trim());
+        const code = els('codeConf').value.trim();
+        if(!email || !code) throw new Error('Informe e-mail e código');
+        await cognito('ConfirmSignUp', { ClientId: COGNITO.clientId, Username: email, ConfirmationCode: code });
+        note('authStatus','Conta confirmada! Faça login.');
+        show('panel-confirm', false);
+      }catch(e){ err('authStatus', e.message||e); }
+    }
+
+    async function doResend(){
+      try{
+        const email = (els('emailConf').value.trim() || els('email').value.trim());
+        if(!email) throw new Error('Informe o e-mail');
+        await cognito('ResendConfirmationCode', { ClientId: COGNITO.clientId, Username: email });
+        note('authStatus','Código reenviado para seu e-mail.');
+      }catch(e){ err('authStatus', e.message||e); }
+    }
+
+    function show(id, on){ els(id).style.display = on ? 'block' : 'none'; }
+
+    // ==== CRUD ====
+    async function createNote(){
+      const text = els('noteText').value.trim();
+      const voice = els('voice').value;
+      if(!text){ err('createStatus','Digite um texto.'); return; }
+      try{
+        const r = await api('/notes', { method:'POST', body: JSON.stringify({ text, voice }) });
+        note('createStatus', `Nota criada!`);
+        els('noteText').value = '';
+        await refreshList();
+      }catch(e){ err('createStatus', e.message||e); }
+    }
+
+    async function refreshList(){
+      try{
+        const data = await api('/notes');
+        renderNotes(data.notes||[]);
+      }catch(e){ err('createStatus', e.message||e); }
+    }
+
+    async function doSearch(){
+      const q = els('q').value.trim();
+      if(!q){ await refreshList(); return; }
+      try{
+        const data = await api('/notes/search?q=' + encodeURIComponent(q));
+        renderNotes(data.notes||[]);
+      }catch(e){ err('createStatus', e.message||e); }
+    }
+
+    async function playNote(noteId){
+      try{
+        const r = await api(`/notes/${noteId}/audio-url`);
+        const player = els('player');
+        player.src = r.audioUrl; player.classList.remove('hidden');
+        await player.play();
+      }catch(e){ alert('Falha ao gerar URL: ' + e.message); }
+    }
+
+    async function deleteNote(noteId){
+      if(!confirm('Apagar esta nota?')) return;
+      try{ await api(`/notes/${noteId}`, { method:'DELETE' }); await refreshList(); }
+      catch(e){ alert('Falha ao apagar: ' + e.message); }
+    }
+
+    function renderNotes(list){
+      const el = els('notes'); el.innerHTML = '';
+      if(!list.length){ el.innerHTML = '<div class="muted">Nenhuma nota ainda.</div>'; return; }
+      for(const it of list){
+        const div = document.createElement('div');
+        div.className = 'note';
+        div.innerHTML = `
+          <div>
+            <h4>${escapeHtml((it.text||'').slice(0,80) || '(sem texto)')}</h4>
+            <div class="muted">${escapeHtml(it.voice||'-')} • <span class="pill">${escapeHtml(it.status||'-')}</span> • ${escapeHtml(fmtDate(it.createdAt||''))}</div>
+          </div>
+          <div class="actions">
+            <button onclick="playNote('${it.noteId}')">Play</button>
+            <button class="danger" onclick="deleteNote('${it.noteId}')">Delete</button>
+          </div>`;
+        el.appendChild(div);
+      }
+    }
+
+    // ==== Bind de eventos quando DOM estiver pronto ====
+    document.addEventListener('DOMContentLoaded', () => {
+      // Botões Auth
+      els('btnSignIn').onclick = signIn;
+      els('btnSignOut').onclick = signOut;
+      document.getElementById('linkSignup').onclick = () => show('panel-signup', true);
+      document.getElementById('linkConfirm').onclick = () => show('panel-confirm', true);
+      els('btnDoSignUp').onclick = doSignUp;
+      els('btnDoConfirm').onclick = doConfirm;
+      els('btnResend').onclick = doResend;
+
+      // CRUD
+      els('btnCreate').onclick = createNote;
+      els('btnRefresh').onclick = refreshList;
+      els('btnSearch').onclick = doSearch;
+
+      // Tentativa de login silencioso via refresh token
+      (async () => {
+        try{ await idToken(); showApp(true); await refreshList(); }
+        catch{ showApp(false); }
+      })();
+    });
+  </script>
+</head>
+<body>
+  <header class="card">
+    <h1>TTS Notes — Demo</h1>
+    <span class="muted">API: https://azt9v4vjue.execute-api.sa-east-1.amazonaws.com/prod</span>
+  </header>
+
+  <div class="container grid">
+    <!-- Login Card -->
+    <section class="card" id="card-auth">
+      <h2 style="margin:0 0 8px">Autenticação</h2>
+      <p class="muted">Faça login com seu e-mail e senha. Se ainda não tiver conta, crie uma.</p>
+      <div class="grid cols-2" style="margin-top:8px;">
+        <div>
+          <label class="muted">E-mail</label>
+          <input id="email" type="email" placeholder="voce@exemplo.com" />
+        </div>
+        <div>
+          <label class="muted">Senha</label>
+          <input id="password" type="password" placeholder="••••••••" />
+        </div>
+      </div>
+      <div class="row" style="margin-top:12px;">
+        <button id="btnSignIn">Entrar</button>
+        <button id="btnSignOut" class="secondary">Sair</button>
+      </div>
+      <div class="row" style="gap:12px;margin-top:8px;">
+        <button id="linkSignup" class="secondary" type="button">Criar conta</button>
+        <button id="linkConfirm" class="secondary" type="button">Confirmar código</button>
+      </div>
+
+      <!-- Painel de cadastro -->
+      <div id="panel-signup" class="card" style="margin-top:12px; display:none;">
+        <h3 style="margin:0 0 8px; font-size:16px;">Criar conta</h3>
+        <div class="grid cols-2">
+          <div>
+            <label class="muted">E-mail</label>
+            <input id="emailSu" type="email" placeholder="voce@exemplo.com" />
+          </div>
+          <div>
+            <label class="muted">Senha</label>
+            <input id="passwordSu" type="password" placeholder="Senha" />
+          </div>
+          <div>
+            <label class="muted">Confirmar senha</label>
+            <input id="passwordSu2" type="password" placeholder="Repita a senha" />
+          </div>
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <button id="btnDoSignUp">Criar conta</button>
+          <button class="secondary" type="button" onclick="document.getElementById('panel-signup').style.display='none'">Fechar</button>
+        </div>
+      </div>
+
+      <!-- Painel de confirmação -->
+      <div id="panel-confirm" class="card" style="margin-top:12px; display:none;">
+        <h3 style="margin:0 0 8px; font-size:16px;">Confirmar cadastro</h3>
+        <div class="grid cols-2">
+          <div>
+            <label class="muted">E-mail</label>
+            <input id="emailConf" type="email" placeholder="voce@exemplo.com" />
+          </div>
+          <div>
+            <label class="muted">Código</label>
+            <input id="codeConf" type="text" placeholder="Código recebido por e-mail" />
+          </div>
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <button id="btnDoConfirm">Confirmar</button>
+          <button id="btnResend" class="secondary" type="button">Reenviar código</button>
+          <button class="secondary" type="button" onclick="document.getElementById('panel-confirm').style.display='none'">Fechar</button>
+        </div>
+      </div>
+
+      <div id="authStatus" class="muted" style="margin-top:8px;"></div>
+    </section>
+
+    <!-- Criar Nota -->
+    <section class="card hidden" id="card-create">
+      <h2 style="margin:0 0 8px">Criar Nota (Texto → MP3)</h2>
+      <div class="grid cols-2">
+        <div style="grid-column:1/-1;">
+          <label class="muted">Texto</label>
+          <textarea id="noteText" rows="4" placeholder="Digite o texto a ser sintetizado..."></textarea>
+        </div>
+        <div>
+          <label class="muted">Voz</label>
+          <select id="voice">
+            <option>Camila</option>
+            <option>Vitoria</option>
+            <option>Ricardo</option>
+          </select>
+        </div>
+        <div class="row">
+          <button id="btnCreate">Criar</button>
+          <button id="btnRefresh" class="secondary">Atualizar lista</button>
+        </div>
+      </div>
+      <div id="createStatus" class="muted" style="margin-top:8px;"></div>
+    </section>
+
+    <!-- Buscar/Lista -->
+    <section class="card hidden" id="card-list">
+      <div class="row" style="justify-content: space-between;">
+        <h2 style="margin:0">Suas notas</h2>
+        <div class="row" style="max-width:420px;">
+          <input id="q" placeholder="Pesquisar no texto..." />
+          <button id="btnSearch" class="secondary">Buscar</button>
+        </div>
+      </div>
+      <div id="notes" class="grid" style="margin-top:12px;"></div>
+      <audio id="player" controls class="audio hidden"></audio>
+    </section>
+  </div>
+
+  <div class="container footer">
+    <span>SPA estática • Cognito User Pools (API REST) • API Gateway + Lambda • S3 Website</span>
+  </div>
+</body>
+</html>

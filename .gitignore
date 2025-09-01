@@ -1,0 +1,32 @@
+# AWS SAM
+.aws-sam/
+.sam-cache/
+**/.aws-sam/
+**/.aws/
+*.template
+.packaged.yaml
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+env/
+venv/
+.pytest_cache/
+
+# Frontend / ferramentas
+node_modules/
+dist/
+build/
+
+# IDE / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Arquivos locais / variáveis
+.env
+.env.*
+samconfig.toml
