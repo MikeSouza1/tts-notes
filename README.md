@@ -3,24 +3,10 @@
 Aplicativo 100% cloud que permite criar **notas de texto** e ouvir a versão **MP3** (Text-to-Speech) gerada na AWS.
 Back‑end em **AWS Lambda** com **API Gateway** (Cognito Authorizer) e dados em **DynamoDB/S3**. Front‑end **estático** (S3, opcionalmente **CloudFront + HTTPS**).
 
-> **Demo (opcional):** adicione aqui a URL do seu site publicado.
+> **Demo:** http://tts-notes-site-993412843245-sa-east-1.s3-website-sa-east-1.amazonaws.com/
 >
 > ⚠️ Este repositório usa **placeholders** para configurações sensíveis a ambiente.
 > Substitua no `html/index.html` antes de publicar o site.
-
-## Arquitetura (alto nível)
-
-```mermaid
-flowchart LR
-  A[SPA estática (S3/CloudFront)] -- Bearer ID Token --> B(API Gateway)
-  subgraph AWS
-  B --> C[Lambda Create/List/Search/Delete/AudioURL]
-  C --> D[(DynamoDB - notas)]
-  C --> E[(S3 - áudios MP3)]
-  end
-  A ..> F[Cognito User Pool]:::auth
-  classDef auth fill:#0ea5e9,stroke:#0369a1,color:#fff;
-```
 
 ## Endpoints
 - `POST /notes` — cria nota (`{ text, voice }`)
